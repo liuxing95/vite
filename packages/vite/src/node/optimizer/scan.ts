@@ -56,8 +56,10 @@ export async function scanImports(config: ResolvedConfig): Promise<{
   const buildInput = config.build.rollupOptions?.input
 
   if (explicitEntryPatterns) {
+    // 先从 optimizeDeps.entries 寻找入口，支持 glob 语法
     entries = await globEntries(explicitEntryPatterns, config)
   } else if (buildInput) {
+    // 其次从 build.rollupOptions.input 配置中寻找，注意需要考虑数组和对象的情况
     const resolvePath = (p: string) => path.resolve(config.root, p)
     if (typeof buildInput === 'string') {
       entries = [resolvePath(buildInput)]
@@ -69,6 +71,7 @@ export async function scanImports(config: ResolvedConfig): Promise<{
       throw new Error('invalid rollupOptions.input value.')
     }
   } else {
+    // 兜底逻辑，如果用户没有进行上述配置，则自动从根目录开始寻找
     entries = await globEntries('**/*.html', config)
   }
 
@@ -96,6 +99,7 @@ export async function scanImports(config: ResolvedConfig): Promise<{
   const deps: Record<string, string> = {}
   const missing: Record<string, string> = {}
   const container = await createPluginContainer(config)
+  // 扫描用到的 Esbuild 插件
   const plugin = esbuildScanPlugin(config, container, deps, missing, entries)
 
   const { plugins = [], ...esbuildOptions } =
@@ -105,6 +109,8 @@ export async function scanImports(config: ResolvedConfig): Promise<{
     entries.map((entry) =>
       build({
         absWorkingDir: process.cwd(),
+        // 值得注意的是，其中传入的write参数被设为 false，表示产物不用写入磁盘，
+        // 这就大大节省了磁盘 I/O 的时间了，也是依赖扫描为什么往往比依赖打包快很多的原因之一。
         write: false,
         entryPoints: [entry],
         bundle: true,
@@ -253,6 +259,7 @@ function esbuildScanPlugin(
         async ({ path }) => {
           let raw = fs.readFileSync(path, 'utf-8')
           // Avoid matching the content of the comment
+          // 去掉注释内容，防止干扰解析过程
           raw = raw.replace(commentRE, '<!---->')
           const isHtml = path.endsWith('.html')
           const regex = isHtml ? scriptModuleRE : scriptRE
@@ -260,6 +267,7 @@ function esbuildScanPlugin(
           let js = ''
           let scriptId = 0
           let match: RegExpExecArray | null
+           // 正式开始解析
           while ((match = regex.exec(raw))) {
             const [, openTag, content] = match
             const typeMatch = openTag.match(typeRE)
@@ -286,6 +294,7 @@ function esbuildScanPlugin(
               loader = 'ts'
             }
             const srcMatch = openTag.match(srcRE)
+            // 根据有无 src 属性来进行不同的处理
             if (srcMatch) {
               const src = srcMatch[1] || srcMatch[2] || srcMatch[3]
               js += `import ${JSON.stringify(src)}\n`
@@ -374,18 +383,21 @@ function esbuildScanPlugin(
       )
 
       // bare imports: record and externalize ----------------------------------
+      // 对于解析 bare import、记录依赖的逻辑依然实现在 scan 插件当中:
       build.onResolve(
         {
           // avoid matching windows volume
           filter: /^[\w@][^:]/
         },
         async ({ path: id, importer, pluginData }) => {
+          // 如果在 optimizeDeps.exclude 列表或者已经记录过了，则将其 externalize (排除)，直接 return
           if (moduleListContains(exclude, id)) {
             return externalUnlessEntry({ path: id })
           }
           if (depImports[id]) {
             return externalUnlessEntry({ path: id })
           }
+          // 接下来解析路径，内部调用各个插件的 resolveId 方法进行解析
           const resolved = await resolve(id, importer, {
             custom: {
               depScan: { loader: pluginData?.htmlType?.loader }
@@ -400,6 +412,7 @@ function esbuildScanPlugin(
               if (isOptimizable(resolved, config.optimizeDeps)) {
                 depImports[id] = resolved
               }
+              // 进行 externalize，因为这里只用扫描出依赖即可，不需要进行打包，具体实现后面的部分会讲到
               return externalUnlessEntry({ path: id })
             } else if (isScannable(resolved)) {
               const namespace = htmlTypesRE.test(resolved) ? 'html' : undefined
@@ -412,6 +425,7 @@ function esbuildScanPlugin(
               return externalUnlessEntry({ path: id })
             }
           } else {
+            /// 没有解析到路径，记录到 missing 表中，后续会检测这张表，显示相关路径未找到的报错
             missing[id] = normalizePath(importer)
           }
         }

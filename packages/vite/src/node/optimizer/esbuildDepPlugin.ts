@@ -204,6 +204,7 @@ export function esbuildDepPlugin(
       // module!
       const root = path.resolve(config.root)
       build.onLoad({ filter: /.*/, namespace: 'dep' }, ({ path: id }) => {
+        // 真实模块所在的路径，拿 react 来说，即`node_modules/react/index.js`
         const entryFile = qualified[id]
 
         let relativePath = normalizePath(path.relative(root, entryFile))

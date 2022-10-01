@@ -514,6 +514,8 @@ export async function resolveConfig(
 
   // resolve cache directory
   const pkgPath = lookupFile(resolvedRoot, [`package.json`], { pathOnly: true })
+  // 在 Vite 预编译时写入依赖产物的路径:
+  // 默认为 node_module/.vite
   const cacheDir = config.cacheDir
     ? path.resolve(resolvedRoot, config.cacheDir)
     : pkgPath
@@ -526,6 +528,7 @@ export async function resolveConfig(
 
   // create an internal resolver to be used in special scenarios, e.g.
   // optimizer & handling css @imports
+  // 定义路径解析器工厂。这里所说的路径解析器，是指调用插件容器进行路径解析的函数。
   const createResolver: ResolvedConfig['createResolver'] = (options) => {
     let aliasContainer: PluginContainer | undefined
     let resolverContainer: PluginContainer | undefined
@@ -667,6 +670,7 @@ export async function resolveConfig(
     ...resolvedConfig
   }
 
+  // 生成插件流水线?
   ;(resolved.plugins as Plugin[]) = await resolvePlugins(
     resolved,
     prePlugins,
@@ -843,6 +847,7 @@ export function sortUserPlugins(
   return [prePlugins, normalPlugins, postPlugins]
 }
 
+// 加载配置文件
 export async function loadConfigFromFile(
   configEnv: ConfigEnv,
   configFile?: string,

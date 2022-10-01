@@ -217,6 +217,7 @@ export interface DepOptimizationMetadata {
  * Scan and optimize dependencies within a project.
  * Used by Vite CLI when running `vite optimize`.
  */
+// 预构建函数入口
 export async function optimizeDeps(
   config: ResolvedConfig,
   force = config.optimizeDeps.force,
@@ -226,6 +227,10 @@ export async function optimizeDeps(
 
   const ssr = config.command === 'build' && !!config.build.ssr
 
+  // 首先是预构建缓存的判断。
+  // Vite 在每次预构建之后都将一些关键信息写入到了_metadata.json文件中，
+  // 第二次启动项目时会通过这个文件中的 hash 值来进行缓存的判断，
+  // 如果命中缓存则不会进行后续的预构建流程
   const cachedMetadata = loadCachedDepOptimizationMetadata(
     config,
     ssr,
@@ -236,6 +241,9 @@ export async function optimizeDeps(
     return cachedMetadata
   }
 
+  // 如果没有命中缓存，则会正式地进入依赖预构建阶段
+  // 不过 Vite 不会直接进行依赖的预构建，而是在之前探测一下项目中存在哪些依赖，收集依赖列表
+  // 进行依赖扫描的过程
   const deps = await discoverProjectDependencies(config)
 
   const depsString = depsLogString(Object.keys(deps))
@@ -245,6 +253,7 @@ export async function optimizeDeps(
 
   const depsInfo = toDiscoveredDependencies(config, deps, ssr)
 
+  // 依赖打包
   const result = await runOptimizeDeps(config, depsInfo)
 
   await result.commit()
@@ -352,13 +361,16 @@ export function loadCachedDepOptimizationMetadata(
   if (!force) {
     let cachedMetadata: DepOptimizationMetadata | undefined
     try {
+      // _metadata.json 文件所在的路径
       const cachedMetadataPath = path.join(depsCacheDir, '_metadata.json')
+      // 获取meta数据
       cachedMetadata = parseDepsOptimizerMetadata(
         fs.readFileSync(cachedMetadataPath, 'utf-8'),
         depsCacheDir
       )
     } catch (e) {}
     // hash is consistent, no need to re-bundle
+    // 当前计算出的哈希值与 _metadata.json 中记录的哈希值一致，表示命中缓存，不用预构建
     if (cachedMetadata && cachedMetadata.hash === getDepHash(config, ssr)) {
       log('Hash is consistent. Skipping. Use --force to override.')
       // Nothing to commit or cancel as we are using the cache, we only
@@ -380,6 +392,7 @@ export function loadCachedDepOptimizationMetadata(
 export async function discoverProjectDependencies(
   config: ResolvedConfig
 ): Promise<Record<string, string>> {
+  // 在scanImports方法内部主要会调用 Esbuild 提供的 build 方法:
   const { deps, missing } = await scanImports(config)
 
   const missingIds = Object.keys(missing)
@@ -578,6 +591,7 @@ export async function runOptimizeDeps(
     plugins.push(esbuildCjsExternalPlugin(external))
   }
   plugins.push(
+    // 预构建专用的插件
     esbuildDepPlugin(flatIdDeps, flatIdToExports, external, config, ssr)
   )
 
@@ -617,6 +631,7 @@ export async function runOptimizeDeps(
     }
   })
 
+  // 打包元信息，后续会根据这份信息生成 _metadata.json
   const meta = result.metafile!
 
   // the paths in `meta.outputs` are relative to `process.cwd()`
@@ -625,6 +640,7 @@ export async function runOptimizeDeps(
     processingCacheDir
   )
 
+  // 其中在进行完依赖扫描的步骤后，就会执行路径的扁平化操作:
   for (const id in depsInfo) {
     const output = esbuildOutputFromId(meta.outputs, id, processingCacheDir)
 
