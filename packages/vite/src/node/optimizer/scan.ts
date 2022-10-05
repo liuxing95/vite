@@ -157,7 +157,8 @@ function globEntries(pattern: string | string[], config: ResolvedConfig) {
         ? []
         : [`**/__tests__/**`, `**/coverage/**`])
     ],
-    absolute: true
+    absolute: true,
+    suppressErrors: true // suppress EACCES errors
   })
 }
 
@@ -479,7 +480,8 @@ function esbuildScanPlugin(
       // css & json & wasm
       build.onResolve(
         {
-          filter: /\.(css|less|sass|scss|styl|stylus|pcss|postcss|json|wasm)$/
+          filter:
+            /\.(css|less|sass|scss|styl|stylus|pcss|postcss|sss|json|wasm)$/
         },
         externalUnlessEntry
       )
