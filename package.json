@@ -100,15 +100,9 @@
     "*": [
       "prettier --write --cache --ignore-unknown"
     ],
-    "packages/*/{src,types}/**/*.ts": [
-      "eslint --cache --fix"
-    ],
-    "packages/**/*.d.ts": [
-      "eslint --cache --fix"
-    ],
-    "playground/**/__tests__/**/*.ts": [
-      "eslint --cache --fix"
-    ]
+    "packages/*/{src,types}/**/*.ts": [],
+    "packages/**/*.d.ts": [],
+    "playground/**/__tests__/**/*.ts": []
   },
   "packageManager": "pnpm@7.13.0",
   "pnpm": {
