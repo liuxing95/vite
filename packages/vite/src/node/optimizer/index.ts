@@ -249,11 +249,15 @@ export async function optimizeDeps(
   const depsString = depsLogString(Object.keys(deps))
   log(colors.green(`Optimizing dependencies:\n  ${depsString}`))
 
+  // 这里是除了自动扫描出来的预构建之外 增加了一个手动配置需要预构建依赖的入口
   await addManuallyIncludedOptimizeDeps(deps, config, ssr)
 
+  // 重写依赖信息
   const depsInfo = toDiscoveredDependencies(config, deps, ssr)
 
   // 依赖打包
+  // 预构建第三个阶段 依赖构建
+  // 主要流程 将每一个需要预构建的依赖通过esbuild 打包成 'esm'格式
   const result = await runOptimizeDeps(config, depsInfo)
 
   await result.commit()
@@ -352,10 +356,13 @@ export function loadCachedDepOptimizationMetadata(
 
   // Before Vite 2.9, dependencies were cached in the root of the cacheDir
   // For compat, we remove the cache if we find the old structure
+  // 在2.9 之前的版本 以来被缓存在 cacheDir 的根目录下
+  // 为了兼容 如果发现老的结构下有这份缓存 会进行清除
   if (fs.existsSync(path.join(config.cacheDir, '_metadata.json'))) {
     emptyDir(config.cacheDir)
   }
 
+  // 获取依赖缓存目录
   const depsCacheDir = getDepsCacheDir(config, ssr)
 
   if (!force) {
@@ -456,6 +463,7 @@ export function depsLogString(qualifiedIds: string[]): string {
  * Internally, Vite uses this function to prepare a optimizeDeps run. When Vite starts, we can get
  * the metadata and start the server without waiting for the optimizeDeps processing to be completed
  */
+// 依赖预构建入口
 export async function runOptimizeDeps(
   resolvedConfig: ResolvedConfig,
   depsInfo: Record<string, OptimizedDepInfo>,
@@ -524,6 +532,11 @@ export async function runOptimizeDeps(
   // 1. flatten all ids to eliminate slash
   // 2. in the plugin, read the entry ourselves as virtual files to retain the
   //    path.
+  // 由于各个第三方包的产物目录结构不一致，这种深层次的嵌套目录对于 Vite 路径解析来说，
+  // 其实是增加了不少的麻烦的，带来了一些不可控的因素。为了解决嵌套目录带来的问题，
+  // Vite 做了两件事情来达到扁平化的预构建产物输出:
+  // 1. 嵌套路径扁平化，/被换成下划线，如 react/jsx-dev-runtime，被重写为react_jsx-dev-runtime；
+  // 2. 用虚拟模块来代替真实模块，作为预打包的入口
   const flatIdDeps: Record<string, string> = {}
   const idToExports: Record<string, ExportsData> = {}
   const flatIdToExports: Record<string, ExportsData> = {}
@@ -545,6 +558,7 @@ export async function runOptimizeDeps(
         ...esbuildOptions.loader
       }
     }
+    // 扁平化处理
     const flatId = flattenId(id)
     flatIdDeps[flatId] = src
     idToExports[id] = exportsData
@@ -939,6 +953,7 @@ export async function extractExportsData(
   config: ResolvedConfig,
   ssr: boolean
 ): Promise<ExportsData> {
+  // 等待`es-module-lexer`初始化完成
   await init
 
   const optimizeDeps = getDepOptimizationConfig(config, ssr)
@@ -954,6 +969,8 @@ export async function extractExportsData(
       write: false,
       format: 'esm'
     })
+    // 开始解析
+    // 结果为一个数组，分别保存 import 和 export 的信息
     const [imports, exports, facade] = parse(result.outputFiles[0].text)
     return {
       hasImports: imports.length > 0,

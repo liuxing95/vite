@@ -165,6 +165,7 @@ export function esbuildDepPlugin(
       }
 
       build.onResolve(
+        // bare import 的路径
         { filter: /^[\w@][^:]/ },
         async ({ path: id, importer, kind }) => {
           if (moduleListContains(external, id)) {
@@ -177,6 +178,8 @@ export function esbuildDepPlugin(
           // ensure esbuild uses our resolved entries
           let entry: { path: string; namespace: string } | undefined
           // if this is an entry, return entry namespace resolve result
+          // 如果没有 importer 则为入口模块
+          // 如果是，则标记上`dep`的 namespace，成为一个虚拟模块
           if (!importer) {
             if ((entry = resolveEntry(id))) return entry
             // check if this is aliased to an entry - also return entry namespace
@@ -202,6 +205,8 @@ export function esbuildDepPlugin(
       // referenced via relative imports - if we don't separate the proxy and
       // the actual module, esbuild will create duplicated copies of the same
       // module!
+      // 这种重导出的做法是必要的，它可以分离虚拟模块和真实模块
+      // 因为真实模块可以通过相对地址来引入。如果不这么做，Esbuild 将会对打包输出两个一样的模块。
       const root = path.resolve(config.root)
       build.onLoad({ filter: /.*/, namespace: 'dep' }, ({ path: id }) => {
         // 真实模块所在的路径，拿 react 来说，即`node_modules/react/index.js`
@@ -219,12 +224,18 @@ export function esbuildDepPlugin(
         let contents = ''
         const { hasImports, exports, hasReExports } = exportsData[id]
         if (!hasImports && !exports.length) {
+          // 处理 CommonJS 模块
           // cjs
           contents += `export default require("${relativePath}");`
         } else {
+          // 处理 ES  模块
+          // 默认导出，即存在 export default 语法
           if (exports.includes('default')) {
             contents += `import d from "${relativePath}";export default d;`
           }
+          // 1. 存在 `export * from` 语法
+          // 2. 多个导出内容
+          // 3. 只有一个导出内容，但这个导出不是 export default
           if (hasReExports || exports.length > 1 || exports[0] !== 'default') {
             contents += `\nexport * from "${relativePath}"`
           }

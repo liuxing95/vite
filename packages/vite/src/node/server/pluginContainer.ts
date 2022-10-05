@@ -136,6 +136,7 @@ type PluginContext = Omit<
 
 export let parser = acorn.Parser
 
+// 创建一个vite 开发环境的 插件容器环境
 export async function createPluginContainer(
   { plugins, logger, root, build: { rollupOptions } }: ResolvedConfig,
   moduleGraph?: ModuleGraph,

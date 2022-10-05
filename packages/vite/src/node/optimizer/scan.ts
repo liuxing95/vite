@@ -42,6 +42,8 @@ const htmlTypesRE = /\.(html|vue|svelte|astro)$/
 export const importsRE =
   /(?<!\/\/.*)(?<=^|;|\*\/)\s*import(?!\s+type)(?:[\w*{}\n\r\t, ]+from\s*)?\s*("[^"]+"|'[^']+')\s*(?=$|;|\/\/|\/\*)/gm
 
+// 预构件依赖扫描的入口
+// 返回所有扫描到的依赖
 export async function scanImports(config: ResolvedConfig): Promise<{
   deps: Record<string, string>
   missing: Record<string, string>
@@ -52,8 +54,12 @@ export async function scanImports(config: ResolvedConfig): Promise<{
 
   let entries: string[] = []
 
+  // 预构建的配置入口有两个
+  // https://vitejs.dev/config/dep-optimization-options.html#optimizedeps-entries
   const explicitEntryPatterns = config.optimizeDeps.entries
+  // https://rollupjs.org/guide/en/#input
   const buildInput = config.build.rollupOptions?.input
+  // 如果用户没有指定具体的入口文件 在自动扫描所有的html 开始文件
 
   if (explicitEntryPatterns) {
     // 先从 optimizeDeps.entries 寻找入口，支持 glob 语法
@@ -72,6 +78,7 @@ export async function scanImports(config: ResolvedConfig): Promise<{
     }
   } else {
     // 兜底逻辑，如果用户没有进行上述配置，则自动从根目录开始寻找
+    // 其中 globEntries 方法即通过 fast-glob 库来从项目根目录扫描文件。
     entries = await globEntries('**/*.html', config)
   }
 
@@ -98,6 +105,7 @@ export async function scanImports(config: ResolvedConfig): Promise<{
 
   const deps: Record<string, string> = {}
   const missing: Record<string, string> = {}
+  // 创建一个 vite 开发环境下的 插件容器 后续讲解
   const container = await createPluginContainer(config)
   // 扫描用到的 Esbuild 插件
   const plugin = esbuildScanPlugin(config, container, deps, missing, entries)
@@ -162,6 +170,7 @@ const typeRE = /\btype\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s'">]+))/im
 const langRE = /\blang\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s'">]+))/im
 const contextRE = /\bcontext\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s'">]+))/im
 
+// esbuild 扫描 的插件
 function esbuildScanPlugin(
   config: ResolvedConfig,
   container: PluginContainer,
@@ -205,18 +214,22 @@ function esbuildScanPlugin(
     external: !entries.includes(path)
   })
 
+  // 针对esbuild 插件的定义
+  // https://esbuild.github.io/plugins/#finding-plugins
   return {
     name: 'vite:dep-scan',
     setup(build) {
       const scripts: Record<string, OnLoadResult> = {}
 
       // external urls
+      // 如果是远程url 的地址  external
       build.onResolve({ filter: externalRE }, ({ path }) => ({
         path,
         external: true
       }))
 
       // data urls
+      // 如果是data url 的地址  external
       build.onResolve({ filter: dataUrlRE }, ({ path }) => ({
         path,
         external: true
@@ -237,6 +250,7 @@ function esbuildScanPlugin(
 
       // html types: extract script contents -----------------------------------
       build.onResolve({ filter: htmlTypesRE }, async ({ path, importer }) => {
+        // 这里是 resolved 返回 的是 经过 各种插件执行 resolvedId 之后 返回的id
         const resolved = await resolve(path, importer)
         if (!resolved) return
         // It is possible for the scanner to scan html types in node_modules.
@@ -254,6 +268,28 @@ function esbuildScanPlugin(
       })
 
       // extract scripts inside HTML-like files and treat it as a js module
+      // 这里是我们vite 最常用的 html 格式
+      /**
+       * <!DOCTYPE html>
+        <html lang="en">
+          <head>
+            <meta charset="UTF-8" />
+            <link rel="icon" type="image/ico" href="/favicon.svg" />
+            <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+            <meta name="theme-color" content="#000000" />
+            <meta name="shopline" content="Shopline Plugin - store-relocation" />
+            <title>Mega Menu</title>
+          </head>
+          <body>
+            <div id="root"></div>
+            <script type="module" src="/src/main.tsx"></script>
+             <script type="module">
+              import React from 'react';
+              console.log(React)
+             </script>
+          </body>
+        </html>
+       */
       build.onLoad(
         { filter: htmlTypesRE, namespace: 'html' },
         async ({ path }) => {
@@ -262,13 +298,16 @@ function esbuildScanPlugin(
           // 去掉注释内容，防止干扰解析过程
           raw = raw.replace(commentRE, '<!---->')
           const isHtml = path.endsWith('.html')
+          // HTML 情况下会寻找 type 为 module 的 script
           const regex = isHtml ? scriptModuleRE : scriptRE
           regex.lastIndex = 0
           let js = ''
           let scriptId = 0
           let match: RegExpExecArray | null
-           // 正式开始解析
+          // 正式开始解析
           while ((match = regex.exec(raw))) {
+            // 第一次: openTag 为 <script type= module  src= /src/main.ts >, 无 content
+            // 第二次: openTag 为 <script type= module >，有 content
             const [, openTag, content] = match
             const typeMatch = openTag.match(typeRE)
             const type =
