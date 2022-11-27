@@ -16,7 +16,7 @@ declare const __HMR_BASE__: string
 declare const __HMR_TIMEOUT__: number
 declare const __HMR_ENABLE_OVERLAY__: boolean
 
-console.debug('[vite] connecting...')
+console.debug('[vite111] connecting...')
 
 const importMetaUrl = new URL(import.meta.url)
 
