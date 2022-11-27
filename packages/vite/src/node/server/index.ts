@@ -1,4 +1,3 @@
-import fs from 'node:fs'
 import path from 'node:path'
 import type * as net from 'node:net'
 import type * as http from 'node:http'
@@ -65,6 +64,7 @@ import {
   serveStaticMiddleware
 } from './middlewares/static'
 import { timeMiddleware } from './middlewares/time'
+import type { ModuleNode } from './moduleGraph'
 import { ModuleGraph } from './moduleGraph'
 import { errorMiddleware, prepareError } from './middlewares/error'
 import type { HmrOptions } from './hmr'
@@ -246,6 +246,11 @@ export interface ViteDevServer {
    */
   ssrFixStacktrace(e: Error): void
   /**
+   * Triggers HMR for a module in the module graph. You can use the `server.moduleGraph`
+   * API to retrieve the module to be reloaded. If `hmr` is false, this is a no-op.
+   */
+  reloadModule(module: ModuleNode): Promise<void>
+  /**
    * Start the server.
    */
   listen(port?: number, isRestart?: boolean): Promise<ViteDevServer>
@@ -305,7 +310,7 @@ export interface ResolvedServerUrls {
 export async function createServer(
   inlineConfig: InlineConfig = {}
 ): Promise<ViteDevServer> {
-  const config = await resolveConfig(inlineConfig, 'serve', 'development')
+  const config = await resolveConfig(inlineConfig, 'serve')
   const { root, server: serverConfig } = config
   const httpsOptions = await resolveHttpsConfig(config.server.https)
   const { middlewareMode } = serverConfig
@@ -381,6 +386,11 @@ export async function createServer(
     },
     ssrRewriteStacktrace(stack: string) {
       return ssrRewriteStacktrace(stack, moduleGraph)
+    },
+    async reloadModule(module) {
+      if (serverConfig.hmr !== false && module.file) {
+        updateModules(module.file, [module], Date.now(), server)
+      }
     },
     async listen(port?: number, isRestart?: boolean) {
       await startServer(server, port, isRestart)
@@ -495,11 +505,23 @@ export async function createServer(
     handleFileAddUnlink(normalizePath(file), server)
   })
 
-  ws.on('vite:invalidate', async ({ path }: InvalidatePayload) => {
+  ws.on('vite:invalidate', async ({ path, message }: InvalidatePayload) => {
     const mod = moduleGraph.urlToModuleMap.get(path)
     if (mod && mod.isSelfAccepting && mod.lastHMRTimestamp > 0) {
+      config.logger.info(
+        colors.yellow(`hmr invalidate `) +
+          colors.dim(path) +
+          (message ? ` ${message}` : ''),
+        { timestamp: true }
+      )
       const file = getShortName(mod.file!, config.root)
-      updateModules(file, [...mod.importers], mod.lastHMRTimestamp, server)
+      updateModules(
+        file,
+        [...mod.importers],
+        mod.lastHMRTimestamp,
+        server,
+        true
+      )
     }
   })
 
@@ -536,8 +558,7 @@ export async function createServer(
   }
 
   // base
-  const devBase = config.base
-  if (devBase !== '/') {
+  if (config.base !== '/') {
     middlewares.use(baseMiddleware(server))
   }
 
@@ -640,8 +661,6 @@ async function startServer(
   const hostname = await resolveHostname(options.host)
 
   const protocol = options.https ? 'https' : 'http'
-  const info = server.config.logger.info
-  const devBase = server.config.base
 
   const serverPort = await httpServerStart(httpServer, {
     port,
@@ -650,27 +669,9 @@ async function startServer(
     logger: server.config.logger
   })
 
-  // @ts-ignore
-  const profileSession = global.__vite_profile_session
-  if (profileSession) {
-    profileSession.post('Profiler.stop', (err: any, { profile }: any) => {
-      // Write profile to disk, upload, etc.
-      if (!err) {
-        const outPath = path.resolve('./vite-profile.cpuprofile')
-        fs.writeFileSync(outPath, JSON.stringify(profile))
-        info(
-          colors.yellow(
-            `  CPU profile written to ${colors.white(colors.dim(outPath))}\n`
-          )
-        )
-      } else {
-        throw err
-      }
-    })
-  }
-
   if (options.open && !isRestart) {
-    const path = typeof options.open === 'string' ? options.open : devBase
+    const path =
+      typeof options.open === 'string' ? options.open : server.config.base
     openBrowser(
       path.startsWith('http')
         ? path

@@ -55,7 +55,7 @@ export const browserExternalId = '__vite-browser-external'
 // special id for packages that are optional peer deps
 export const optionalPeerDepId = '__vite-optional-peer-dep'
 
-const nodeModulesInPathRE = /(^|\/)node_modules\//
+const nodeModulesInPathRE = /(?:^|\/)node_modules\//
 
 const isDebug = process.env.DEBUG
 const debug = createDebugger('vite:resolve-details', {
@@ -105,6 +105,8 @@ export interface InternalResolveOptions extends Required<ResolveOptions> {
   // Resolve using esbuild deps optimization
   getDepsOptimizer?: (ssr: boolean) => DepsOptimizer | undefined
   shouldExternalize?: (id: string) => boolean | undefined
+  // Check this resolve is called from `hookNodeResolve` in SSR
+  isHookNodeResolve?: boolean
 }
 
 export function resolvePlugin(resolveOptions: InternalResolveOptions): Plugin {
@@ -531,9 +533,6 @@ function tryResolveFile(
   tryPrefix?: string,
   skipPackageJson?: boolean
 ): string | undefined {
-  // #2051 if we don't have read permission on a directory, existsSync() still
-  // works and will result in massively slow subsequent checks (which are
-  // unnecessary in the first place)
   if (isFileReadable(file)) {
     if (!fs.statSync(file).isDirectory()) {
       return getRealPath(file, options.preserveSymlinks) + postfix
@@ -580,12 +579,21 @@ function tryResolveFile(
   }
 }
 
+export type InternalResolveOptionsWithOverrideConditions =
+  InternalResolveOptions & {
+    /**
+     * @deprecated In future, `conditions` will work like this.
+     * @internal
+     */
+    overrideConditions?: string[]
+  }
+
 export const idToPkgMap = new Map<string, PackageData>()
 
 export function tryNodeResolve(
   id: string,
   importer: string | null | undefined,
-  options: InternalResolveOptions,
+  options: InternalResolveOptionsWithOverrideConditions,
   targetWeb: boolean,
   depsOptimizer?: DepsOptimizer,
   ssr?: boolean,
@@ -648,20 +656,44 @@ export function tryNodeResolve(
     basedir = nestedResolveFrom(nestedRoot, basedir, preserveSymlinks)
   }
 
+  // nearest package.json
+  let nearestPkg: PackageData | undefined
+  // nearest package.json that may have the `exports` field
   let pkg: PackageData | undefined
-  const pkgId = possiblePkgIds.reverse().find((pkgId) => {
-    pkg = resolvePackageData(pkgId, basedir, preserveSymlinks, packageCache)!
-    return pkg
+
+  let pkgId = possiblePkgIds.reverse().find((pkgId) => {
+    nearestPkg = resolvePackageData(
+      pkgId,
+      basedir,
+      preserveSymlinks,
+      packageCache
+    )!
+    return nearestPkg
   })!
 
-  if (!pkg) {
+  const rootPkgId = possiblePkgIds[0]
+  const rootPkg = resolvePackageData(
+    rootPkgId,
+    basedir,
+    preserveSymlinks,
+    packageCache
+  )!
+  if (rootPkg?.data?.exports) {
+    pkg = rootPkg
+    pkgId = rootPkgId
+  } else {
+    pkg = nearestPkg
+  }
+
+  if (!pkg || !nearestPkg) {
     // if import can't be found, check if it's an optional peer dep.
     // if so, we can resolve to a special id that errors only when imported.
     if (
+      !options.isHookNodeResolve &&
       basedir !== root && // root has no peer dep
-      !isBuiltin(id) &&
-      !id.includes('\0') &&
-      bareImportRE.test(id)
+      !isBuiltin(nestedPath) &&
+      !nestedPath.includes('\0') &&
+      bareImportRE.test(nestedPath)
     ) {
       // find package.json with `name` as main
       const mainPackageJson = lookupFile(basedir, ['package.json'], {
@@ -670,11 +702,11 @@ export function tryNodeResolve(
       if (mainPackageJson) {
         const mainPkg = JSON.parse(mainPackageJson)
         if (
-          mainPkg.peerDependencies?.[id] &&
-          mainPkg.peerDependenciesMeta?.[id]?.optional
+          mainPkg.peerDependencies?.[nestedPath] &&
+          mainPkg.peerDependenciesMeta?.[nestedPath]?.optional
         ) {
           return {
-            id: `${optionalPeerDepId}:${id}:${mainPkg.name}`
+            id: `${optionalPeerDepId}:${nestedPath}:${mainPkg.name}`
           }
         }
       }
@@ -753,7 +785,8 @@ export function tryNodeResolve(
   }
 
   const ext = path.extname(resolved)
-  const isCJS = ext === '.cjs' || (ext === '.js' && pkg.data.type !== 'module')
+  const isCJS =
+    ext === '.cjs' || (ext === '.js' && nearestPkg.data.type !== 'module')
 
   if (
     !options.ssrOptimizeCheck &&
@@ -1007,17 +1040,44 @@ function packageEntryFailure(id: string, details?: string) {
   )
 }
 
+const conditionalConditions = new Set(['production', 'development', 'module'])
+
 function resolveExports(
   pkg: PackageData['data'],
   key: string,
-  options: InternalResolveOptions,
+  options: InternalResolveOptionsWithOverrideConditions,
   targetWeb: boolean
 ) {
-  const conditions = [options.isProduction ? 'production' : 'development']
-  if (!options.isRequire) {
+  const overrideConditions = options.overrideConditions
+    ? new Set(options.overrideConditions)
+    : undefined
+
+  const conditions = []
+  if (
+    (!overrideConditions || overrideConditions.has('production')) &&
+    options.isProduction
+  ) {
+    conditions.push('production')
+  }
+  if (
+    (!overrideConditions || overrideConditions.has('development')) &&
+    !options.isProduction
+  ) {
+    conditions.push('development')
+  }
+  if (
+    (!overrideConditions || overrideConditions.has('module')) &&
+    !options.isRequire
+  ) {
     conditions.push('module')
   }
-  if (options.conditions.length > 0) {
+  if (options.overrideConditions) {
+    conditions.push(
+      ...options.overrideConditions.filter((condition) =>
+        conditionalConditions.has(condition)
+      )
+    )
+  } else if (options.conditions.length > 0) {
     conditions.push(...options.conditions)
   }
 

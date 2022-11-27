@@ -1,6 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import { parse as parseUrl, pathToFileURL } from 'node:url'
+import { pathToFileURL } from 'node:url'
 import { performance } from 'node:perf_hooks'
 import { createRequire } from 'node:module'
 import colors from 'picocolors'
@@ -25,6 +25,7 @@ import {
   createDebugger,
   createFilter,
   dynamicImport,
+  isBuiltin,
   isExternalUrl,
   isObject,
   lookupFile,
@@ -47,7 +48,11 @@ import {
   DEFAULT_MAIN_FIELDS,
   ENV_ENTRY
 } from './constants'
-import type { InternalResolveOptions, ResolveOptions } from './plugins/resolve'
+import type {
+  InternalResolveOptions,
+  InternalResolveOptionsWithOverrideConditions,
+  ResolveOptions
+} from './plugins/resolve'
 import { resolvePlugin, tryNodeResolve } from './plugins/resolve'
 import type { LogLevel, Logger } from './logger'
 import { createLogger } from './logger'
@@ -318,6 +323,8 @@ export type ResolvedConfig = Readonly<
     inlineConfig: InlineConfig
     root: string
     base: string
+    /** @internal */
+    rawBase: string
     publicDir: string
     cacheDir: string
     command: 'build' | 'serve'
@@ -365,21 +372,17 @@ export type ResolveFn = (
 export async function resolveConfig(
   inlineConfig: InlineConfig,
   command: 'build' | 'serve',
-  defaultMode = 'development'
+  defaultMode = 'development',
+  defaultNodeEnv = 'development'
 ): Promise<ResolvedConfig> {
   let config = inlineConfig
   let configFileDependencies: string[] = []
   let mode = inlineConfig.mode || defaultMode
 
   // some dependencies e.g. @vue/compiler-* relies on NODE_ENV for getting
-  // production-specific behavior, so set it here even though we haven't
-  // resolve the final mode yet
-  if (mode === 'production') {
-    process.env.NODE_ENV = 'production'
-  }
-  // production env would not work in serve, fallback to development
-  if (command === 'serve' && process.env.NODE_ENV === 'production') {
-    process.env.NODE_ENV = 'development'
+  // production-specific behavior, so set it early on
+  if (!process.env.NODE_ENV) {
+    process.env.NODE_ENV = defaultNodeEnv
   }
 
   const configEnv = {
@@ -403,47 +406,33 @@ export async function resolveConfig(
     }
   }
 
-  // Define logger
-  const logger = createLogger(config.logLevel, {
-    allowClearScreen: config.clearScreen,
-    customLogger: config.customLogger
-  })
-
   // user config may provide an alternative mode. But --mode has a higher priority
   mode = inlineConfig.mode || config.mode || mode
   configEnv.mode = mode
 
+  const filterPlugin = (p: Plugin) => {
+    if (!p) {
+      return false
+    } else if (!p.apply) {
+      return true
+    } else if (typeof p.apply === 'function') {
+      return p.apply({ ...config, mode }, configEnv)
+    } else {
+      return p.apply === command
+    }
+  }
   // Some plugins that aren't intended to work in the bundling of workers (doing post-processing at build time for example).
   // And Plugins may also have cached that could be corrupted by being used in these extra rollup calls.
   // So we need to separate the worker plugin from the plugin that vite needs to run.
   const rawWorkerUserPlugins = (
     (await asyncFlatten(config.worker?.plugins || [])) as Plugin[]
-  ).filter((p) => {
-    if (!p) {
-      return false
-    } else if (!p.apply) {
-      return true
-    } else if (typeof p.apply === 'function') {
-      return p.apply({ ...config, mode }, configEnv)
-    } else {
-      return p.apply === command
-    }
-  })
+  ).filter(filterPlugin)
 
   // resolve plugins
   const rawUserPlugins = (
     (await asyncFlatten(config.plugins || [])) as Plugin[]
-  ).filter((p) => {
-    if (!p) {
-      return false
-    } else if (!p.apply) {
-      return true
-    } else if (typeof p.apply === 'function') {
-      return p.apply({ ...config, mode }, configEnv)
-    } else {
-      return p.apply === command
-    }
-  })
+  ).filter(filterPlugin)
+
   const [prePlugins, normalPlugins, postPlugins] =
     sortUserPlugins(rawUserPlugins)
 
@@ -460,14 +449,20 @@ export async function resolveConfig(
     config.build.commonjsOptions = { include: [] }
   }
 
+  // Define logger
+  const logger = createLogger(config.logLevel, {
+    allowClearScreen: config.clearScreen,
+    customLogger: config.customLogger
+  })
+
   // resolve root
   const resolvedRoot = normalizePath(
     config.root ? path.resolve(config.root) : process.cwd()
   )
 
   const clientAlias = [
-    { find: /^[\/]?@vite\/env/, replacement: () => ENV_ENTRY },
-    { find: /^[\/]?@vite\/client/, replacement: () => CLIENT_ENTRY }
+    { find: /^\/?@vite\/env/, replacement: () => ENV_ENTRY },
+    { find: /^\/?@vite\/client/, replacement: () => CLIENT_ENTRY }
   ]
 
   // resolve alias with internal client alias
@@ -522,11 +517,7 @@ export async function resolveConfig(
       : './'
     : resolveBaseUrl(config.base, isBuild, logger) ?? '/'
 
-  const resolvedBuildOptions = resolveBuildOptions(
-    config.build,
-    isBuild,
-    logger
-  )
+  const resolvedBuildOptions = resolveBuildOptions(config.build, logger)
 
   // resolve cache directory
   const pkgPath = lookupFile(resolvedRoot, [`package.json`], { pathOnly: true })
@@ -538,9 +529,11 @@ export async function resolveConfig(
     ? path.join(path.dirname(pkgPath), `node_modules/.vite`)
     : path.join(resolvedRoot, `.vite`)
 
-  const assetsFilter = config.assetsInclude
-    ? createFilter(config.assetsInclude)
-    : () => false
+  const assetsFilter =
+    config.assetsInclude &&
+    (!Array.isArray(config.assetsInclude) || config.assetsInclude.length)
+      ? createFilter(config.assetsInclude)
+      : () => false
 
   // create an internal resolver to be used in special scenarios, e.g.
   // optimizer & handling css @imports
@@ -579,7 +572,10 @@ export async function resolveConfig(
           }))
       }
       return (
-        await container.resolveId(id, importer, { ssr, scan: options?.scan })
+        await container.resolveId(id, importer, {
+          ssr,
+          scan: options?.scan
+        })
       )?.id
     }
   }
@@ -633,7 +629,8 @@ export async function resolveConfig(
     ),
     inlineConfig,
     root: resolvedRoot,
-    base: resolvedBase,
+    base: resolvedBase.endsWith('/') ? resolvedBase : resolvedBase + '/',
+    rawBase: resolvedBase,
     resolve: resolveOptions,
     publicDir: resolvedPublicDir,
     cacheDir,
@@ -816,34 +813,25 @@ export function resolveBaseUrl(
         )
       )
     )
-    base = '/'
+    return '/'
   }
 
-  // external URL
-  if (isExternalUrl(base)) {
-    if (!isBuild) {
-      // get base from full url during dev
-      const parsed = parseUrl(base)
-      base = parsed.pathname || '/'
-    }
-  } else {
+  // external URL flag
+  const isExternal = isExternalUrl(base)
+  // no leading slash warn
+  if (!isExternal && !base.startsWith('/')) {
+    logger.warn(
+      colors.yellow(colors.bold(`(!) "base" option should start with a slash.`))
+    )
+  }
+
+  // parse base when command is serve or base is not External URL
+  if (!isBuild || !isExternal) {
+    base = new URL(base, 'http://vitejs.dev').pathname
     // ensure leading slash
     if (!base.startsWith('/')) {
-      logger.warn(
-        colors.yellow(
-          colors.bold(`(!) "base" option should start with a slash.`)
-        )
-      )
       base = '/' + base
     }
-  }
-
-  // ensure ending slash
-  if (!base.endsWith('/')) {
-    logger.warn(
-      colors.yellow(colors.bold(`(!) "base" option should end with a slash.`))
-    )
-    base += '/'
   }
 
   return base
@@ -961,6 +949,7 @@ async function bundleConfigFile(
     platform: 'node',
     bundle: true,
     format: isESM ? 'esm' : 'cjs',
+    mainFields: ['main'],
     sourcemap: 'inline',
     metafile: true,
     define: {
@@ -972,7 +961,7 @@ async function bundleConfigFile(
       {
         name: 'externalize-deps',
         setup(build) {
-          const options: InternalResolveOptions = {
+          const options: InternalResolveOptionsWithOverrideConditions = {
             root: path.dirname(fileName),
             isBuild: true,
             isProduction: true,
@@ -982,14 +971,28 @@ async function bundleConfigFile(
             mainFields: [],
             browserField: false,
             conditions: [],
+            overrideConditions: ['node'],
             dedupe: [],
             extensions: DEFAULT_EXTENSIONS,
             preserveSymlinks: false
           }
 
-          build.onResolve({ filter: /.*/ }, ({ path: id, importer, kind }) => {
-            // externalize bare imports
-            if (id[0] !== '.' && !isAbsolute(id)) {
+          // externalize bare imports
+          build.onResolve(
+            { filter: /^[^.].*/ },
+            async ({ path: id, importer, kind }) => {
+              if (
+                kind === 'entry-point' ||
+                path.isAbsolute(id) ||
+                isBuiltin(id)
+              ) {
+                return
+              }
+
+              // partial deno support as `npm:` does not work with esbuild
+              if (id.startsWith('npm:')) {
+                return { external: true }
+              }
               let idFsPath = tryNodeResolve(id, importer, options, false)?.id
               if (idFsPath && (isESM || kind === 'dynamic-import')) {
                 idFsPath = pathToFileURL(idFsPath).href
@@ -999,7 +1002,7 @@ async function bundleConfigFile(
                 external: true
               }
             }
-          })
+          )
         }
       },
       {
@@ -1119,8 +1122,4 @@ export function isDepsOptimizerEnabled(
     (command === 'build' && disabled === 'build') ||
     (command === 'serve' && disabled === 'dev')
   )
-}
-
-function isAbsolute(id: string) {
-  return path.isAbsolute(id) || path.posix.isAbsolute(id)
 }

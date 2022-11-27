@@ -79,15 +79,15 @@ export async function bundleWorkerEntry(
     } = await bundle.generate({
       entryFileNames: path.posix.join(
         config.build.assetsDir,
-        '[name].[hash].js'
+        '[name]-[hash].js'
       ),
       chunkFileNames: path.posix.join(
         config.build.assetsDir,
-        '[name].[hash].js'
+        '[name]-[hash].js'
       ),
       assetFileNames: path.posix.join(
         config.build.assetsDir,
-        '[name].[hash].[ext]'
+        '[name]-[hash].[ext]'
       ),
       ...workerConfig,
       format,
@@ -356,14 +356,7 @@ export function webWorkerPlugin(config: ResolvedConfig): Plugin {
             typeof replacement === 'string'
               ? JSON.stringify(replacement).slice(1, -1)
               : `"+${replacement.runtime}+"`
-          s.overwrite(
-            match.index,
-            match.index + full.length,
-            replacementString,
-            {
-              contentOnly: true
-            }
-          )
+          s.update(match.index, match.index + full.length, replacementString)
         }
       }
       return result()

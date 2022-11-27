@@ -38,7 +38,7 @@ export function assetImportMetaUrlPlugin(config: ResolvedConfig): Plugin {
       ) {
         let s: MagicString | undefined
         const assetImportMetaUrlRE =
-          /\bnew\s+URL\s*\(\s*('[^']+'|"[^"]+"|`[^`]+`)\s*,\s*import\.meta\.url\s*,?\s*\)/g
+          /\bnew\s+URL\s*\(\s*('[^']+'|"[^"]+"|`[^`]+`)\s*,\s*import\.meta\.url\s*(?:,\s*)?\)/g
         const cleanString = stripLiteral(code)
 
         let match: RegExpExecArray | null
@@ -61,11 +61,10 @@ export function assetImportMetaUrlPlugin(config: ResolvedConfig): Plugin {
               // target so we use the global location here. It can be
               // window.location or self.location in case it is used in a Web Worker.
               // @see https://developer.mozilla.org/en-US/docs/Web/API/Window/self
-              s.overwrite(
+              s.update(
                 index,
                 index + exp.length,
-                `new URL((import.meta.glob(${pattern}, { eager: true, import: 'default', as: 'url' }))[${rawUrl}], self.location)`,
-                { contentOnly: true }
+                `new URL((import.meta.glob(${pattern}, { eager: true, import: 'default', as: 'url' }))[${rawUrl}], self.location)`
               )
               continue
             }
@@ -111,11 +110,10 @@ export function assetImportMetaUrlPlugin(config: ResolvedConfig): Plugin {
             )
             builtUrl = url
           }
-          s.overwrite(
+          s.update(
             index,
             index + exp.length,
-            `new URL(${JSON.stringify(builtUrl)}, self.location)`,
-            { contentOnly: true }
+            `new URL(${JSON.stringify(builtUrl)}, self.location)`
           )
         }
         if (s) {

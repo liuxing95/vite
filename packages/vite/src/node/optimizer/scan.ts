@@ -29,7 +29,7 @@ type ResolveIdOptions = Parameters<PluginContainer['resolveId']>[2]
 
 const debug = createDebugger('vite:deps')
 
-const htmlTypesRE = /\.(html|vue|svelte|astro)$/
+const htmlTypesRE = /\.(html|vue|svelte|astro|imba)$/
 
 // A simple regex to detect import sources. This is only used on
 // <script lang="ts"> blocks in vue (setup only) or svelte files, since
@@ -40,7 +40,7 @@ const htmlTypesRE = /\.(html|vue|svelte|astro)$/
 // since even missed imports can be caught at runtime, and false positives will
 // simply be ignored.
 export const importsRE =
-  /(?<!\/\/.*)(?<=^|;|\*\/)\s*import(?!\s+type)(?:[\w*{}\n\r\t, ]+from\s*)?\s*("[^"]+"|'[^']+')\s*(?=$|;|\/\/|\/\*)/gm
+  /(?<!\/\/.*)(?<=^|;|\*\/)\s*import(?!\s+type)(?:[\w*{}\n\r\t, ]+from)?\s*("[^"]+"|'[^']+')\s*(?=$|;|\/\/|\/\*)/gm
 
 // 预构件依赖扫描的入口
 // 返回所有扫描到的依赖
@@ -163,13 +163,13 @@ function globEntries(pattern: string | string[], config: ResolvedConfig) {
 }
 
 const scriptModuleRE =
-  /(<script\b[^>]*type\s*=\s*(?:"module"|'module')[^>]*>)(.*?)<\/script>/gims
-export const scriptRE = /(<script\b(?:\s[^>]*>|>))(.*?)<\/script>/gims
+  /(<script\b[^>]+type\s*=\s*(?:"module"|'module')[^>]*>)(.*?)<\/script>/gis
+export const scriptRE = /(<script(?:\s[^>]*>|>))(.*?)<\/script>/gis
 export const commentRE = /<!--.*?-->/gs
-const srcRE = /\bsrc\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s'">]+))/im
-const typeRE = /\btype\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s'">]+))/im
-const langRE = /\blang\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s'">]+))/im
-const contextRE = /\bcontext\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s'">]+))/im
+const srcRE = /\bsrc\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s'">]+))/i
+const typeRE = /\btype\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s'">]+))/i
+const langRE = /\blang\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s'">]+))/i
+const contextRE = /\bcontext\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s'">]+))/i
 
 // esbuild 扫描 的插件
 function esbuildScanPlugin(
@@ -217,6 +217,29 @@ function esbuildScanPlugin(
 
   // 针对esbuild 插件的定义
   // https://esbuild.github.io/plugins/#finding-plugins
+  const doTransformGlobImport = async (
+    contents: string,
+    id: string,
+    loader: Loader
+  ) => {
+    let transpiledContents
+    // transpile because `transformGlobImport` only expects js
+    if (loader !== 'js') {
+      transpiledContents = (await transform(contents, { loader })).code
+    } else {
+      transpiledContents = contents
+    }
+
+    const result = await transformGlobImport(
+      transpiledContents,
+      id,
+      config.root,
+      resolve
+    )
+
+    return result?.s.toString() || transpiledContents
+  }
+
   return {
     name: 'vite:dep-scan',
     setup(build) {
@@ -353,26 +376,9 @@ function esbuildScanPlugin(
 
               const key = `${path}?id=${scriptId++}`
               if (contents.includes('import.meta.glob')) {
-                let transpiledContents
-                // transpile because `transformGlobImport` only expects js
-                if (loader !== 'js') {
-                  transpiledContents = (await transform(contents, { loader }))
-                    .code
-                } else {
-                  transpiledContents = contents
-                }
-
                 scripts[key] = {
                   loader: 'js', // since it is transpiled
-                  contents:
-                    (
-                      await transformGlobImport(
-                        transpiledContents,
-                        path,
-                        config.root,
-                        resolve
-                      )
-                    )?.s.toString() || transpiledContents,
+                  contents: await doTransformGlobImport(contents, path, loader),
                   pluginData: {
                     htmlType: { loader }
                   }
@@ -534,7 +540,7 @@ function esbuildScanPlugin(
       // for jsx/tsx, we need to access the content and check for
       // presence of import.meta.glob, since it results in import relationships
       // but isn't crawled by esbuild.
-      build.onLoad({ filter: JS_TYPES_RE }, ({ path: id }) => {
+      build.onLoad({ filter: JS_TYPES_RE }, async ({ path: id }) => {
         let ext = path.extname(id).slice(1)
         if (ext === 'mjs') ext = 'js'
 
@@ -546,6 +552,13 @@ function esbuildScanPlugin(
         const loader =
           config.optimizeDeps?.esbuildOptions?.loader?.[`.${ext}`] ||
           (ext as Loader)
+
+        if (contents.includes('import.meta.glob')) {
+          return {
+            loader: 'js', // since it is transpiled,
+            contents: await doTransformGlobImport(contents, id, loader)
+          }
+        }
 
         return {
           loader,

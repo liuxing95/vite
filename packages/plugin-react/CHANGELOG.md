@@ -1,3 +1,25 @@
+## 3.0.0-alpha.1 (2022-11-15)
+
+* fix(plugin-react): jsxDev is not a function when is set NODE_ENV in env files (#10861) ([be1ba4a](https://github.com/vitejs/vite/commit/be1ba4a)), closes [#10861](https://github.com/vitejs/vite/issues/10861)
+* perf: regexp perf issues, refactor regexp stylistic issues (#10905) ([fc007df](https://github.com/vitejs/vite/commit/fc007df)), closes [#10905](https://github.com/vitejs/vite/issues/10905)
+
+
+
+## 3.0.0-alpha.0 (2022-11-08)
+
+* feat!: transform jsx with esbuild instead of babel (#9590) ([f677b62](https://github.com/vitejs/vite/commit/f677b62)), closes [#9590](https://github.com/vitejs/vite/issues/9590)
+* fix(deps): update all non-major dependencies (#10804) ([f686afa](https://github.com/vitejs/vite/commit/f686afa)), closes [#10804](https://github.com/vitejs/vite/issues/10804)
+
+
+
+## 2.2.0 (2022-10-26)
+
+* fix(deps): update all non-major dependencies (#10610) ([bb95467](https://github.com/vitejs/vite/commit/bb95467)), closes [#10610](https://github.com/vitejs/vite/issues/10610)
+* fix(plugin-react): update `package.json` (#10479) ([7f45eb5](https://github.com/vitejs/vite/commit/7f45eb5)), closes [#10479](https://github.com/vitejs/vite/issues/10479)
+* chore(deps): update all non-major dependencies (#10393) ([f519423](https://github.com/vitejs/vite/commit/f519423)), closes [#10393](https://github.com/vitejs/vite/issues/10393)
+
+
+
 ## 2.2.0-beta.0 (2022-10-05)
 
 * fix(deps): update all non-major dependencies (#10077) ([caf00c8](https://github.com/vitejs/vite/commit/caf00c8)), closes [#10077](https://github.com/vitejs/vite/issues/10077)

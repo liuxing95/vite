@@ -9,6 +9,7 @@ import {
   addToHTMLProxyCache,
   applyHtmlTransforms,
   assetAttrsConfig,
+  getAttrKey,
   getScriptInfo,
   nodeIsElement,
   overwriteAttrValue,
@@ -25,6 +26,7 @@ import {
   ensureWatchedFile,
   fsPathFromId,
   injectQuery,
+  joinUrlSegments,
   normalizePath,
   processSrcSetSync,
   wrapId
@@ -92,19 +94,16 @@ const processNodeUrl = (
   const devBase = config.base
   if (startsWithSingleSlashRE.test(url)) {
     // prefix with base (dev only, base is never relative)
-    overwriteAttrValue(s, sourceCodeLocation, devBase + url.slice(1))
+    const fullUrl = path.posix.join(devBase, url)
+    overwriteAttrValue(s, sourceCodeLocation, fullUrl)
   } else if (
     url.startsWith('.') &&
     originalUrl &&
     originalUrl !== '/' &&
     htmlPath === '/index.html'
   ) {
-    const replacer = (url: string) =>
-      path.posix.join(
-        devBase,
-        path.posix.relative(originalUrl, devBase),
-        url.slice(1)
-      )
+    // prefix with base (dev only, base is never relative)
+    const replacer = (url: string) => path.posix.join(devBase, url)
 
     // #3230 if some request url (localhost:3000/a/b) return to fallback html, the relative assets
     // path will add `/a/` prefix, it will caused 404.
@@ -112,7 +111,7 @@ const processNodeUrl = (
     // rewrite after `../index.js` -> `localhost:5173/index.js`.
 
     const processedUrl =
-      attr.name === 'srcset'
+      attr.name === 'srcset' && attr.prefix === undefined
         ? processSrcSetSync(url, ({ url }) => replacer(url))
         : replacer(url)
     overwriteAttrValue(s, sourceCodeLocation, processedUrl)
@@ -131,7 +130,7 @@ const devHtmlHook: IndexHtmlTransformHook = async (
   const trailingSlash = htmlPath.endsWith('/')
   if (!trailingSlash && fs.existsSync(filename)) {
     proxyModulePath = htmlPath
-    proxyModuleUrl = base + htmlPath.slice(1)
+    proxyModuleUrl = joinUrlSegments(base, htmlPath)
   } else {
     // There are users of vite.transformIndexHtml calling it with url '/'
     // for SSR integrations #7993, filename is root for this case
@@ -184,11 +183,10 @@ const devHtmlHook: IndexHtmlTransformHook = async (
     if (module) {
       server?.moduleGraph.invalidateModule(module)
     }
-    s.overwrite(
+    s.update(
       node.sourceCodeLocation!.startOffset,
       node.sourceCodeLocation!.endOffset,
-      `<script type="module" src="${modulePath}"></script>`,
-      { contentOnly: true }
+      `<script type="module" src="${modulePath}"></script>`
     )
   }
 
@@ -229,10 +227,11 @@ const devHtmlHook: IndexHtmlTransformHook = async (
     const assetAttrs = assetAttrsConfig[node.nodeName]
     if (assetAttrs) {
       for (const p of node.attrs) {
-        if (p.value && assetAttrs.includes(p.name)) {
+        const attrKey = getAttrKey(p)
+        if (p.value && assetAttrs.includes(attrKey)) {
           processNodeUrl(
             p,
-            node.sourceCodeLocation!.attrs![p.name],
+            node.sourceCodeLocation!.attrs![attrKey],
             s,
             config,
             htmlPath,

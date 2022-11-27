@@ -154,10 +154,12 @@ async function handleMessage(payload: HMRPayload) {
         clearErrorOverlay()
         isFirstUpdate = false
       }
-      payload.updates.forEach((update) => {
-        if (update.type === 'js-update') {
-          queueUpdate(fetchUpdate(update))
-        } else {
+      await Promise.all(
+        payload.updates.map(async (update): Promise<void> => {
+          if (update.type === 'js-update') {
+            return queueUpdate(fetchUpdate(update))
+          }
+
           // css-update
           // this is only sent when a css file referenced with <link> is updated
           const { path, timestamp } = update
@@ -171,27 +173,36 @@ async function handleMessage(payload: HMRPayload) {
             (e) =>
               !outdatedLinkTags.has(e) && cleanUrl(e.href).includes(searchUrl)
           )
-          if (el) {
-            const newPath = `${base}${searchUrl.slice(1)}${
-              searchUrl.includes('?') ? '&' : '?'
-            }t=${timestamp}`
 
-            // rather than swapping the href on the existing tag, we will
-            // create a new link tag. Once the new stylesheet has loaded we
-            // will remove the existing link tag. This removes a Flash Of
-            // Unstyled Content that can occur when swapping out the tag href
-            // directly, as the new stylesheet has not yet been loaded.
+          if (!el) {
+            return
+          }
+
+          const newPath = `${base}${searchUrl.slice(1)}${
+            searchUrl.includes('?') ? '&' : '?'
+          }t=${timestamp}`
+
+          // rather than swapping the href on the existing tag, we will
+          // create a new link tag. Once the new stylesheet has loaded we
+          // will remove the existing link tag. This removes a Flash Of
+          // Unstyled Content that can occur when swapping out the tag href
+          // directly, as the new stylesheet has not yet been loaded.
+          return new Promise((resolve) => {
             const newLinkTag = el.cloneNode() as HTMLLinkElement
             newLinkTag.href = new URL(newPath, el.href).href
-            const removeOldEl = () => el.remove()
+            const removeOldEl = () => {
+              el.remove()
+              console.debug(`[vite] css hot updated: ${searchUrl}`)
+              resolve()
+            }
             newLinkTag.addEventListener('load', removeOldEl)
             newLinkTag.addEventListener('error', removeOldEl)
             outdatedLinkTags.add(el)
             el.after(newLinkTag)
-          }
-          console.debug(`[vite] css hot updated: ${searchUrl}`)
-        }
-      })
+          })
+        })
+      )
+      notifyListeners('vite:afterUpdate', payload)
       break
     case 'custom': {
       notifyListeners(payload.event, payload.data)
@@ -365,10 +376,10 @@ export function updateStyle(id: string, content: string): void {
       style = document.createElement('style')
       style.setAttribute('type', 'text/css')
       style.setAttribute('data-vite-dev-id', id)
-      style.innerHTML = content
+      style.textContent = content
       document.head.appendChild(style)
     } else {
-      style.innerHTML = content
+      style.textContent = content
     }
   }
   sheetsMap.set(id, style)
@@ -403,7 +414,7 @@ async function fetchUpdate({
     return
   }
 
-  const moduleMap = new Map<string, ModuleNamespace>()
+  let fetchedModule: ModuleNamespace | undefined
   const isSelfUpdate = path === acceptedPath
 
   // determine the qualified callbacks before we re-import the modules
@@ -412,28 +423,26 @@ async function fetchUpdate({
   )
 
   if (isSelfUpdate || qualifiedCallbacks.length > 0) {
-    const dep = acceptedPath
-    const disposer = disposeMap.get(dep)
-    if (disposer) await disposer(dataMap.get(dep))
-    const [path, query] = dep.split(`?`)
+    const disposer = disposeMap.get(acceptedPath)
+    if (disposer) await disposer(dataMap.get(acceptedPath))
+    const [acceptedPathWithoutQuery, query] = acceptedPath.split(`?`)
     try {
-      const newMod: ModuleNamespace = await import(
+      fetchedModule = await import(
         /* @vite-ignore */
         base +
-          path.slice(1) +
+          acceptedPathWithoutQuery.slice(1) +
           `?${explicitImportRequired ? 'import&' : ''}t=${timestamp}${
             query ? `&${query}` : ''
           }`
       )
-      moduleMap.set(dep, newMod)
     } catch (e) {
-      warnFailedFetch(e, dep)
+      warnFailedFetch(e, acceptedPath)
     }
   }
 
   return () => {
     for (const { deps, fn } of qualifiedCallbacks) {
-      fn(deps.map((dep) => moduleMap.get(dep)))
+      fn(deps.map((dep) => (dep === acceptedPath ? fetchedModule : undefined)))
     }
     const loggedPath = isSelfUpdate ? path : `${acceptedPath} via ${path}`
     console.debug(`[vite] hot updated: ${loggedPath}`)
@@ -516,10 +525,10 @@ export function createHotContext(ownerPath: string): ViteHotContext {
     accept(deps?: any, callback?: any) {
       if (typeof deps === 'function' || !deps) {
         // self-accept: hot.accept(() => {})
-        acceptDeps([ownerPath], ([mod]) => deps && deps(mod))
+        acceptDeps([ownerPath], ([mod]) => deps?.(mod))
       } else if (typeof deps === 'string') {
         // explicit deps
-        acceptDeps([deps], ([mod]) => callback && callback(mod))
+        acceptDeps([deps], ([mod]) => callback?.(mod))
       } else if (Array.isArray(deps)) {
         acceptDeps(deps, callback)
       } else {
@@ -529,16 +538,15 @@ export function createHotContext(ownerPath: string): ViteHotContext {
 
     // export names (first arg) are irrelevant on the client side, they're
     // extracted in the server for propagation
-    acceptExports(_: string | readonly string[], callback?: any) {
-      acceptDeps([ownerPath], callback && (([mod]) => callback(mod)))
+    acceptExports(_, callback) {
+      acceptDeps([ownerPath], ([mod]) => callback?.(mod))
     },
 
     dispose(cb) {
       disposeMap.set(ownerPath, cb)
     },
 
-    // @ts-expect-error untyped
-    prune(cb: (data: any) => void) {
+    prune(cb) {
       pruneMap.set(ownerPath, cb)
     },
 
@@ -547,9 +555,12 @@ export function createHotContext(ownerPath: string): ViteHotContext {
     decline() {},
 
     // tell the server to re-perform hmr propagation from this module as root
-    invalidate() {
-      notifyListeners('vite:invalidate', { path: ownerPath })
-      this.send('vite:invalidate', { path: ownerPath })
+    invalidate(message) {
+      notifyListeners('vite:invalidate', { path: ownerPath, message })
+      this.send('vite:invalidate', { path: ownerPath, message })
+      console.debug(
+        `[vite] invalidate ${ownerPath}${message ? `: ${message}` : ''}`
+      )
     },
 
     // custom events

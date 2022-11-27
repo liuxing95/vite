@@ -27,7 +27,14 @@ import { isDepsOptimizerEnabled, resolveConfig } from './config'
 import { buildReporterPlugin } from './plugins/reporter'
 import { buildEsbuildPlugin } from './plugins/esbuild'
 import { terserPlugin } from './plugins/terser'
-import { copyDir, emptyDir, lookupFile, normalizePath } from './utils'
+import {
+  asyncFlatten,
+  copyDir,
+  emptyDir,
+  joinUrlSegments,
+  lookupFile,
+  normalizePath
+} from './utils'
 import { manifestPlugin } from './plugins/manifest'
 import type { Logger } from './logger'
 import { dataURIPlugin } from './plugins/dataUri'
@@ -50,6 +57,7 @@ import { ensureWatchPlugin } from './plugins/ensureWatch'
 import { ESBUILD_MODULES_TARGET, VERSION } from './constants'
 import { resolveChokidarOptions } from './watch'
 import { completeSystemWrapPlugin } from './plugins/completeSystemWrap'
+import { mergeConfig } from './publicUtils'
 
 export interface BuildOptions {
   /**
@@ -158,6 +166,12 @@ export interface BuildOptions {
    * @default true when outDir is a sub directory of project root
    */
   emptyOutDir?: boolean | null
+  /**
+   * Copy the public directory to outDir on write.
+   * @default true
+   * @experimental
+   */
+  copyPublicDir?: boolean
   /**
    * Whether to emit a manifest.json under assets dir to map hash-less filenames
    * to their hashed versions. Useful when you want to generate your own HTML
@@ -270,7 +284,6 @@ export interface ResolvedBuildOptions
 
 export function resolveBuildOptions(
   raw: BuildOptions | undefined,
-  isBuild: boolean,
   logger: Logger
 ): ResolvedBuildOptions {
   const deprecatedPolyfillModulePreload = raw?.polyfillModulePreload
@@ -295,36 +308,45 @@ export function resolveBuildOptions(
     polyfill: true
   }
 
-  const resolved: ResolvedBuildOptions = {
-    target: 'modules',
+  const defaultBuildOptions: BuildOptions = {
     outDir: 'dist',
     assetsDir: 'assets',
     assetsInlineLimit: 4096,
     cssCodeSplit: !raw?.lib,
-    cssTarget: false,
     sourcemap: false,
     rollupOptions: {},
     minify: raw?.ssr ? false : 'esbuild',
     terserOptions: {},
     write: true,
     emptyOutDir: null,
+    copyPublicDir: true,
     manifest: false,
     lib: false,
     ssr: false,
     ssrManifest: false,
     reportCompressedSize: true,
     chunkSizeWarningLimit: 500,
-    watch: null,
-    ...raw,
+    watch: null
+  }
+
+  const userBuildOptions = raw
+    ? mergeConfig(defaultBuildOptions, raw)
+    : defaultBuildOptions
+
+  // @ts-expect-error Fallback options instead of merging
+  const resolved: ResolvedBuildOptions = {
+    target: 'modules',
+    cssTarget: false,
+    ...userBuildOptions,
     commonjsOptions: {
       include: [/node_modules/],
       extensions: ['.js', '.cjs'],
-      ...raw?.commonjsOptions
+      ...userBuildOptions.commonjsOptions
     },
     dynamicImportVarsOptions: {
       warnOnError: true,
       exclude: [/node_modules/],
-      ...raw?.dynamicImportVarsOptions
+      ...userBuildOptions.dynamicImportVarsOptions
     },
     // Resolve to false | object
     modulePreload:
@@ -362,15 +384,16 @@ export function resolveBuildOptions(
   return resolved
 }
 
-export function resolveBuildPlugins(config: ResolvedConfig): {
+export async function resolveBuildPlugins(config: ResolvedConfig): Promise<{
   pre: Plugin[]
   post: Plugin[]
-} {
+}> {
   const options = config.build
   const { commonjsOptions } = options
   const usePluginCommonjs =
     !Array.isArray(commonjsOptions?.include) ||
     commonjsOptions?.include.length !== 0
+  const rollupOptionsPlugins = options.rollupOptions.plugins
   return {
     pre: [
       completeSystemWrapPlugin(),
@@ -378,9 +401,13 @@ export function resolveBuildPlugins(config: ResolvedConfig): {
       watchPackageDataPlugin(config),
       ...(usePluginCommonjs ? [commonjsPlugin(options.commonjsOptions)] : []),
       dataURIPlugin(),
-      ...(options.rollupOptions.plugins
-        ? (options.rollupOptions.plugins.filter(Boolean) as Plugin[])
-        : [])
+      ...((
+        await asyncFlatten(
+          Array.isArray(rollupOptionsPlugins)
+            ? rollupOptionsPlugins
+            : [rollupOptionsPlugins]
+        )
+      ).filter(Boolean) as Plugin[])
     ],
     post: [
       buildImportAnalysisPlugin(config),
@@ -388,7 +415,7 @@ export function resolveBuildPlugins(config: ResolvedConfig): {
       ...(options.minify ? [terserPlugin(config)] : []),
       ...(options.manifest ? [manifestPlugin(config)] : []),
       ...(options.ssrManifest ? [ssrManifestPlugin(config)] : []),
-      buildReporterPlugin(config),
+      ...(!config.isWorker ? [buildReporterPlugin(config)] : []),
       loadFallbackPlugin()
     ]
   }
@@ -425,7 +452,12 @@ export async function build(
 async function doBuild(
   inlineConfig: InlineConfig = {}
 ): Promise<RollupOutput | RollupOutput[] | RollupWatcher> {
-  const config = await resolveConfig(inlineConfig, 'build', 'production')
+  const config = await resolveConfig(
+    inlineConfig,
+    'build',
+    'production',
+    'production'
+  )
   const options = config.build
   const ssr = !!options.ssr
   const libOptions = options.lib
@@ -549,13 +581,13 @@ async function doBuild(
           : libOptions
           ? ({ name }) =>
               resolveLibFilename(libOptions, format, name, config.root, jsExt)
-          : path.posix.join(options.assetsDir, `[name].[hash].${jsExt}`),
+          : path.posix.join(options.assetsDir, `[name]-[hash].${jsExt}`),
         chunkFileNames: libOptions
-          ? `[name].[hash].${jsExt}`
-          : path.posix.join(options.assetsDir, `[name].[hash].${jsExt}`),
+          ? `[name]-[hash].${jsExt}`
+          : path.posix.join(options.assetsDir, `[name]-[hash].${jsExt}`),
         assetFileNames: libOptions
           ? `[name].[ext]`
-          : path.posix.join(options.assetsDir, `[name].[hash].[ext]`),
+          : path.posix.join(options.assetsDir, `[name]-[hash].[ext]`),
         inlineDynamicImports:
           output.format === 'umd' ||
           output.format === 'iife' ||
@@ -687,7 +719,11 @@ function prepareOutDir(
         .filter(Boolean)
       emptyDir(outDir, [...skipDirs, '.git'])
     }
-    if (config.publicDir && fs.existsSync(config.publicDir)) {
+    if (
+      config.build.copyPublicDir &&
+      config.publicDir &&
+      fs.existsSync(config.publicDir)
+    ) {
       copyDir(config.publicDir, outDir)
     }
   }
@@ -746,44 +782,55 @@ export function resolveLibFilename(
   return `${name}.${format}.${extension}`
 }
 
-function resolveBuildOutputs(
+export function resolveBuildOutputs(
   outputs: OutputOptions | OutputOptions[] | undefined,
   libOptions: LibraryOptions | false,
   logger: Logger
 ): OutputOptions | OutputOptions[] | undefined {
   if (libOptions) {
-    const formats = libOptions.formats || ['es', 'umd']
-    if (formats.includes('umd') || formats.includes('iife')) {
-      if (
-        typeof libOptions.entry !== 'string' &&
-        Object.values(libOptions.entry).length > 1
-      ) {
-        throw new Error(
-          `Multiple entry points are not supported when output formats include "umd" or "iife".`
-        )
+    const libHasMultipleEntries =
+      typeof libOptions.entry !== 'string' &&
+      Object.values(libOptions.entry).length > 1
+    const libFormats =
+      libOptions.formats ||
+      (libHasMultipleEntries ? ['es', 'cjs'] : ['es', 'umd'])
+
+    if (!Array.isArray(outputs)) {
+      if (libFormats.includes('umd') || libFormats.includes('iife')) {
+        if (libHasMultipleEntries) {
+          throw new Error(
+            'Multiple entry points are not supported when output formats include "umd" or "iife".'
+          )
+        }
+
+        if (!libOptions.name) {
+          throw new Error(
+            'Option "build.lib.name" is required when output formats include "umd" or "iife".'
+          )
+        }
       }
 
-      if (!libOptions.name) {
-        throw new Error(
-          `Option "build.lib.name" is required when output formats ` +
-            `include "umd" or "iife".`
-        )
-      }
+      return libFormats.map((format) => ({ ...outputs, format }))
     }
-    if (!outputs) {
-      return formats.map((format) => ({ format }))
-    } else if (!Array.isArray(outputs)) {
-      return formats.map((format) => ({ ...outputs, format }))
-    } else if (libOptions.formats) {
-      // user explicitly specifying own output array
+
+    // By this point, we know "outputs" is an Array.
+    if (libOptions.formats) {
       logger.warn(
         colors.yellow(
-          `"build.lib.formats" will be ignored because ` +
-            `"build.rollupOptions.output" is already an array format`
+          '"build.lib.formats" will be ignored because "build.rollupOptions.output" is already an array format.'
         )
       )
     }
+
+    outputs.forEach((output) => {
+      if (['umd', 'iife'].includes(output.format!) && !output.name) {
+        throw new Error(
+          'Entries in "build.rollupOptions.output" must specify "name" when the format is "umd" or "iife".'
+        )
+      }
+    })
   }
+
   return outputs
 }
 
@@ -799,12 +846,12 @@ export function onRollupWarning(
   config: ResolvedConfig
 ): void {
   if (warning.code === 'UNRESOLVED_IMPORT') {
-    const id = warning.source
-    const importer = warning.importer
+    const id = warning.id
+    const exporter = warning.exporter
     // throw unless it's commonjs external...
-    if (!importer || !/\?commonjs-external$/.test(importer)) {
+    if (!id || !/\?commonjs-external$/.test(id)) {
       throw new Error(
-        `[vite]: Rollup failed to resolve import "${id}" from "${importer}".\n` +
+        `[vite]: Rollup failed to resolve import "${exporter}" from "${id}".\n` +
           `This is most likely unintended because it can break your application at runtime.\n` +
           `If you do want to externalize this module explicitly add it to\n` +
           `\`build.rollupOptions.external\``
@@ -1049,7 +1096,7 @@ export function toOutputFilePathInJS(
   if (relative && !config.build.ssr) {
     return toRelative(filename, hostId)
   }
-  return config.base + filename
+  return joinUrlSegments(config.base, filename)
 }
 
 export function createToImportMetaURLBasedRelativeRuntime(
@@ -1096,7 +1143,7 @@ export function toOutputFilePathWithoutRuntime(
   if (relative && !config.build.ssr) {
     return toRelative(filename, hostId)
   } else {
-    return config.base + filename
+    return joinUrlSegments(config.base, filename)
   }
 }
 

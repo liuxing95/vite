@@ -11,11 +11,13 @@ import {
   normalizePath
 } from '../utils'
 import { browserExternalId, optionalPeerDepId } from '../plugins/resolve'
-import type { ExportsData } from '.'
 
 const externalWithConversionNamespace =
   'vite:dep-pre-bundle:external-conversion'
 const convertedExternalPrefix = 'vite-dep-pre-bundle-external:'
+
+const cjsExternalFacadeNamespace = 'vite:cjs-external-facade'
+const nonFacadePrefix = 'vite-cjs-external-facade:'
 
 const externalTypes = [
   'css',
@@ -34,6 +36,7 @@ const externalTypes = [
   'svelte',
   'marko',
   'astro',
+  'imba',
   // JSX/TSX may be configured to be compiled differently from how esbuild
   // handles it by default, so exclude them as well
   'jsx',
@@ -43,7 +46,6 @@ const externalTypes = [
 
 export function esbuildDepPlugin(
   qualified: Record<string, string>,
-  exportsData: Record<string, ExportsData>,
   external: string[],
   config: ResolvedConfig,
   ssr: boolean
@@ -162,8 +164,7 @@ export function esbuildDepPlugin(
         const flatId = flattenId(id)
         if (flatId in qualified) {
           return {
-            path: flatId,
-            namespace: 'dep'
+            path: qualified[flatId]
           }
         }
       }
@@ -180,7 +181,7 @@ export function esbuildDepPlugin(
           }
 
           // ensure esbuild uses our resolved entries
-          let entry: { path: string; namespace: string } | undefined
+          let entry: { path: string } | undefined
           // if this is an entry, return entry namespace resolve result
           // 如果没有 importer 则为入口模块
           // 如果是，则标记上`dep`的 namespace，成为一个虚拟模块
@@ -200,57 +201,6 @@ export function esbuildDepPlugin(
           }
         }
       )
-
-      // For entry files, we'll read it ourselves and construct a proxy module
-      // to retain the entry's raw id instead of file path so that esbuild
-      // outputs desired output file structure.
-      // It is necessary to do the re-exporting to separate the virtual proxy
-      // module from the actual module since the actual module may get
-      // referenced via relative imports - if we don't separate the proxy and
-      // the actual module, esbuild will create duplicated copies of the same
-      // module!
-      // 这种重导出的做法是必要的，它可以分离虚拟模块和真实模块
-      // 因为真实模块可以通过相对地址来引入。如果不这么做，Esbuild 将会对打包输出两个一样的模块。
-      const root = path.resolve(config.root)
-      build.onLoad({ filter: /.*/, namespace: 'dep' }, ({ path: id }) => {
-        // 真实模块所在的路径，拿 react 来说，即`node_modules/react/index.js`
-        const entryFile = qualified[id]
-
-        let relativePath = normalizePath(path.relative(root, entryFile))
-        if (
-          !relativePath.startsWith('./') &&
-          !relativePath.startsWith('../') &&
-          relativePath !== '.'
-        ) {
-          relativePath = `./${relativePath}`
-        }
-
-        let contents = ''
-        const { hasImports, exports, hasReExports } = exportsData[id]
-        if (!hasImports && !exports.length) {
-          // 处理 CommonJS 模块
-          // cjs
-          contents += `export default require("${relativePath}");`
-        } else {
-          // 处理 ES  模块
-          // 默认导出，即存在 export default 语法
-          if (exports.includes('default')) {
-            contents += `import d from "${relativePath}";export default d;`
-          }
-          // 1. 存在 `export * from` 语法
-          // 2. 多个导出内容
-          // 3. 只有一个导出内容，但这个导出不是 export default
-          if (hasReExports || exports.length > 1 || exports[0] !== 'default') {
-            contents += `\nexport * from "${relativePath}"`
-          }
-        }
-
-        return {
-          loader: 'js',
-          contents,
-          resolveDir: root
-        }
-      })
 
       build.onLoad(
         { filter: /.*/, namespace: 'browser-external' },
@@ -321,22 +271,39 @@ export function esbuildCjsExternalPlugin(externals: string[]): Plugin {
     name: 'cjs-external',
     setup(build) {
       const escape = (text: string) =>
-        `^${text.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&')}$`
+        `^${text.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&')}$`
       const filter = new RegExp(externals.map(escape).join('|'))
 
-      build.onResolve({ filter: /.*/, namespace: 'external' }, (args) => ({
-        path: args.path,
-        external: true
-      }))
+      build.onResolve({ filter: new RegExp(`^${nonFacadePrefix}`) }, (args) => {
+        return {
+          path: args.path.slice(nonFacadePrefix.length),
+          external: true
+        }
+      })
 
-      build.onResolve({ filter }, (args) => ({
-        path: args.path,
-        namespace: 'external'
-      }))
+      build.onResolve({ filter }, (args) => {
+        if (args.kind === 'require-call') {
+          return {
+            path: args.path,
+            namespace: cjsExternalFacadeNamespace
+          }
+        }
 
-      build.onLoad({ filter: /.*/, namespace: 'external' }, (args) => ({
-        contents: `export * from ${JSON.stringify(args.path)}`
-      }))
+        return {
+          path: args.path,
+          external: true
+        }
+      })
+
+      build.onLoad(
+        { filter: /.*/, namespace: cjsExternalFacadeNamespace },
+        (args) => ({
+          contents:
+            `import * as m from ${JSON.stringify(
+              nonFacadePrefix + args.path
+            )};` + `module.exports = m;`
+        })
+      )
     }
   }
 }
