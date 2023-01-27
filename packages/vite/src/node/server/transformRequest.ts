@@ -116,7 +116,14 @@ export function transformRequest(
 
   return request
 }
-
+/**
+ * 转换入口 主要执行 resolveId load 跟 transform
+ * @param url
+ * @param server
+ * @param options
+ * @param timestamp
+ * @returns
+ */
 async function doTransform(
   url: string,
   server: ViteDevServer,
@@ -149,6 +156,7 @@ async function doTransform(
   const id =
     (await pluginContainer.resolveId(url, undefined, { ssr }))?.id || url
 
+  // load + transform
   const result = loadAndTransform(id, url, server, options, timestamp)
 
   getDepsOptimizer(config, ssr)?.delayDepsOptimizerUntil(id, () => result)

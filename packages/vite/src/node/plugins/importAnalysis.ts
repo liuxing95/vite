@@ -194,6 +194,7 @@ export function importAnalysisPlugin(config: ResolvedConfig): Plugin {
       let exports!: readonly ExportSpecifier[]
       source = stripBomTag(source)
       try {
+        // 解析 import 语句
         ;[imports, exports] = parseImports(source)
       } catch (e: any) {
         const isVue = importer.endsWith('.vue')
@@ -384,6 +385,7 @@ export function importAnalysisPlugin(config: ResolvedConfig): Plugin {
         return [url, resolved.id]
       }
 
+      // 对每一个 import 语句依次进行分析
       for (let index = 0; index < imports.length; index++) {
         const {
           s: start,
@@ -494,6 +496,7 @@ export function importAnalysisPlugin(config: ResolvedConfig): Plugin {
               // page reload. We could return a 404 in that case but it is safe to return the request
               const file = cleanUrl(resolvedId) // Remove ?v={hash}
 
+              // 判断第三方库是否预加载
               const needsInterop = await optimizedDepNeedsInterop(
                 depsOptimizer.metadata,
                 file,
@@ -514,6 +517,8 @@ export function importAnalysisPlugin(config: ResolvedConfig): Plugin {
                 }
               } else if (needsInterop) {
                 debug(`${url} needs interop`)
+                // import __vite__cjsImport0_react from "/node_modules/.vite/deps/react.js?v=e0a099cc";
+                //  第三方库: 路径重写到预构建产物的路径
                 interopNamedImports(str(), imports[index], url, index)
                 rewriteDone = true
               }

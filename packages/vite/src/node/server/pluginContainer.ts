@@ -525,6 +525,9 @@ export async function createPluginContainer(
 
   let closed = false
 
+  /**
+   * 容器container
+   */
   const container: PluginContainer = {
     options: await (async () => {
       let options = rollupOptions

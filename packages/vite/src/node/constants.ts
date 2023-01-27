@@ -60,6 +60,7 @@ export const FS_PREFIX = `/@fs/`
  */
 export const VALID_ID_PREFIX = `/@id/`
 
+// TODO: 虚拟模块？？
 /**
  * Plugins that use 'virtual modules' (e.g. for helper functions), prefix the
  * module ID with `\0`, a convention from the rollup ecosystem.

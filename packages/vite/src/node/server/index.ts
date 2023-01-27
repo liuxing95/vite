@@ -310,6 +310,10 @@ export interface ResolvedServerUrls {
 export async function createServer(
   inlineConfig: InlineConfig = {}
 ): Promise<ViteDevServer> {
+  /**
+   * resolveConfig 配置入口
+   * 其中会生成config.plugins 传给 createPluginContainer 去生成插件容器
+   */
   const config = await resolveConfig(inlineConfig, 'serve')
   const { root, server: serverConfig } = config
   const httpsOptions = await resolveHttpsConfig(config.server.https)
@@ -320,6 +324,8 @@ export async function createServer(
     ...serverConfig.watch
   })
 
+  // connect 是一个具有中间件机制的轻量级 Node.js 框架。
+  // 既可以单独作为服务器，也可以接入到任何具有中间件机制的框架中，如 Koa、Express
   const middlewares = connect() as Connect.Server
   const httpServer = middlewareMode
     ? null
@@ -335,10 +341,12 @@ export async function createServer(
     resolvedWatchOptions
   ) as FSWatcher
 
+  // 依赖图 TODO:
   const moduleGraph: ModuleGraph = new ModuleGraph((url, ssr) =>
     container.resolveId(url, undefined, { ssr })
   )
 
+  // 容器
   const container = await createPluginContainer(config, moduleGraph, watcher)
   const closeHttpServer = createServerCloseFn(httpServer)
 
@@ -454,6 +462,7 @@ export async function createServer(
     _fsDenyGlob: picomatch(config.server.fs.deny, { matchBase: true })
   }
 
+  // 通过执行插件的 transformIndexHtml 方法来对 HTML 进行自定义的修改
   server.transformIndexHtml = createDevHtmlTransformFn(server)
 
   if (!middlewareMode) {
@@ -593,6 +602,7 @@ export async function createServer(
 
   if (config.appType === 'spa' || config.appType === 'mpa') {
     // transform index.html
+    // 入口html加载 中间件
     middlewares.use(indexHtmlMiddleware(server))
 
     // handle 404s
@@ -619,6 +629,7 @@ export async function createServer(
       await container.buildStart({})
       if (isDepsOptimizerEnabled(config, false)) {
         // non-ssr
+        // 预构建逻辑的入口
         await initDepsOptimizer(config, server)
       }
       initingServer = undefined
